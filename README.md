@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-discord ultimate precise streaming spoofer - v5.0
+discord direct stream spoofer - v7.0 (final & autonomous)
 revere group, 2026.
 """
 
@@ -17,18 +17,17 @@ import urllib.request
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-# إعداد السجل (Logging) للمتابعة الدقيقة على الخادم
+# إعداد السجل (Logging) للمتابعة الدقيقة
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
-logger = logging.getLogger("PreciseStreamer")
+logger = logging.getLogger("AutonomousStreamer")
 
 ROOT = Path(__file__).resolve().parent
-STATE_FILE = ROOT / "precise_stream_state.json"
+STATE_FILE = ROOT / "autonomous_stream_state.json"
 
-ME_URL = "https://discord.com/api/v9/users/@me?with_analytics_token=true"
 SCIENCE_URL = "https://discord.com/api/v9/science"
 GAMES_CDN_URL = "https://cdn.discordapp.com/detectables/games.json"
 
@@ -42,11 +41,13 @@ USER_AGENT = (
     "Electron/42.7.1 Safari/537.36"
 )
 
+# الثوابت الخاصة بك لضمان التشغيل التلقائي الكامل دون سؤال متكرر
+FIXED_VOICE_CHANNEL_ID = "1514634823866650637"
+
 @dataclass
 class State:
     token: str = ""
-    voice_channel_id: str = ""
-    analytics_token: str = ""
+    voice_channel_id: str = FIXED_VOICE_CHANNEL_ID
     total_minutes: int = 0
 
     @classmethod
@@ -54,7 +55,11 @@ class State:
         if STATE_FILE.exists():
             try:
                 data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-                return cls(**{k: data.get(k, v) for k, v in cls().__dict__.items()})
+                obj = cls()
+                obj.token = data.get("token", "")
+                obj.voice_channel_id = data.get("voice_channel_id", FIXED_VOICE_CHANNEL_ID)
+                obj.total_minutes = data.get("total_minutes", 0)
+                return obj
             except Exception:
                 pass
         return cls()
@@ -78,22 +83,6 @@ def build_super_props(launch_signature: str, heartbeat_session: str) -> str:
     }
     raw = json.dumps(props, separators=(",", ":")).encode("utf-8")
     return base64.b64encode(raw).decode("ascii")
-
-def fetch_analytics_token(auth_token: str, super_props: str) -> str:
-    # تنظيف التوكن من أي مسافات أو علامات تنصيص عن طريق الخطأ
-    clean_token = auth_token.strip().strip('"').strip("'")
-    req = urllib.request.Request(ME_URL, headers={
-        "authorization": clean_token, "user-agent": USER_AGENT, "x-super-properties": super_props
-    })
-    try:
-        with urllib.request.urlopen(req, timeout=15) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"Token rejected (HTTP {exc.code})") from exc
-    token = data.get("analytics_token")
-    if not token:
-        raise RuntimeError("Missing analytics_token in response")
-    return token
 
 @dataclass(frozen=True)
 class Session:
@@ -128,7 +117,7 @@ def fetch_primary_game() -> Game:
         pass
     return Game("469433659223531536", "Visual Studio Code", "code.exe")
 
-class StreamEngine:
+class AutonomousStreamEngine:
     def __init__(self, state: State, session: Session, game: Game) -> None:
         self.state = state
         self.session = session
@@ -157,7 +146,7 @@ class StreamEngine:
                 "final_heartbeat": False,
                 "game_session_id": sid,
                 "duration_tracked_ms": duration_ms,
-                "voice_channel_id": self.state.voice_channel_id if self.state.voice_channel_id else None,
+                "voice_channel_id": self.state.voice_channel_id,
                 "voice_channel_type": "guild_voice",
                 "is_streaming": True,
                 "video_enabled": True,
@@ -168,7 +157,7 @@ class StreamEngine:
             }
         }
         
-        payload = {"token": self.state.analytics_token, "events": [event]}
+        payload = {"token": None, "events": [event]}
         body = json.dumps(payload).encode("utf-8")
         headers = {
             "authorization": clean_token,
@@ -188,49 +177,37 @@ class StreamEngine:
             return 0
 
 def main() -> None:
-    logger.info("Initializing Precise Discord Stream Spoofer...")
+    logger.info("Initializing Autonomous Discord Stream Spoofer...")
     state = State.load()
     
+    # إذا لم يكن التوكن مخزناً، سيطلبه منك مرة واحدة فقط ويقوم بحفظه أوتوماتيكياً
     if not state.token:
         token_input = input("Enter your Discord Token: ").strip()
         if not token_input:
             logger.error("Token is required.")
             sys.exit(1)
         state.token = token_input
+        state.voice_channel_id = FIXED_VOICE_CHANNEL_ID
         state.save()
-
-    if not state.voice_channel_id:
-        vc_input = input("Enter Voice Channel ID: ").strip()
-        if vc_input:
-            state.voice_channel_id = vc_input
-            state.save()
+        logger.info("Token and Voice Channel ID saved successfully.")
 
     session = Session.new()
-    try:
-        logger.info("Authenticating with Discord API...")
-        state.analytics_token = fetch_analytics_token(state.token, session.super_props)
-        state.save()
-        logger.info("Authentication successful!")
-    except Exception as e:
-        logger.error(f"Auth failed: {e}")
-        logger.info("Tip: Please check if your token is valid or update it.")
-        sys.exit(1)
-
     game = fetch_primary_game()
-    engine = StreamEngine(state, session, game)
+    engine = AutonomousStreamEngine(state, session, game)
     
-    logger.info(f"Stream simulation started successfully for game: {game.name}")
-    logger.info("Running loop... Press Ctrl+C to stop safely.")
+    logger.info(f"Stream simulation loop started for game: {game.name}")
+    logger.info(f"Target Voice Channel ID: {state.voice_channel_id}")
+    logger.info("Running loop with viewer simulation... Press Ctrl+C to stop safely.")
 
     try:
         while True:
             status = engine.send_heartbeat(60000)
-            if status == 204:
+            if status in (200, 202, 204):
                 state.total_minutes += 1
                 state.save()
-                logger.info(f"Heartbeat sent (204). Total tracked minutes: {state.total_minutes}")
+                logger.info(f"Heartbeat sent successfully ({status}). Total tracked minutes: {state.total_minutes}")
             elif status == 401:
-                logger.error("Token rejected (401 Unauthorized). Please update your token.")
+                logger.error("Token rejected (401 Unauthorized). Please check your token.")
                 break
             else:
                 logger.warning(f"Received status code {status}. Retrying next cycle...")

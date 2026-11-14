@@ -1,11 +1,26 @@
 import asyncio
+import random
+import re
 import time
 import aiohttp
 import discord
 from discord.ext import commands
 
-_ws = aiohttp.ClientSession.ws_connect
-aiohttp.ClientSession.ws_connect = lambda self, *a, **kw: _ws(self, *a, **{**kw, "max_msg_size": 0})
+try:
+    from curl_cffi.requests import AsyncSession
+    _c_ws = AsyncSession.ws_connect
+    def _patched_c_ws(self, *a, **kw):
+        kw["max_message_size"] = 50 * 1024 * 1024
+        return _c_ws(self, *a, **kw)
+    AsyncSession.ws_connect = _patched_c_ws
+except Exception:
+    pass
+
+_a_ws = aiohttp.ClientSession.ws_connect
+def _patched_a_ws(self, *a, **kw):
+    kw["max_msg_size"] = 0
+    return _a_ws(self, *a, **kw)
+aiohttp.ClientSession.ws_connect = _patched_a_ws
 
 TOKEN = ""
 
@@ -72,10 +87,14 @@ bot = commands.Bot(
     help_command=None
 )
 
-current_game = GAMES["1"]
-current_app_id = 356875221078245376
+current_game = "Dead by Daylight"
+current_app_id = 381889378202451979
 active = False
 start_ts = 0
+cleaning = False
+
+def norm(s):
+    return re.sub(r"[^a-z0-9 ]", "", s.lower()).strip()
 
 async def load_discord_apps():
     global APP_DB
@@ -88,15 +107,30 @@ async def load_discord_apps():
         pass
 
 def find_app_id(game_name):
-    target = game_name.lower().replace("remake", "").strip()
+    raw = game_name.lower().strip()
+    clean = norm(game_name.replace("Remake", "").replace("Remastered", ""))
+
     for app in APP_DB:
-        names = [app.get("name", "").lower()] + [a.lower() for a in app.get("aliases", [])]
-        if game_name.lower() in names or target in names:
+        names = [app.get("name", "")] + app.get("aliases", [])
+        if any(raw == n.lower() for n in names):
             return int(app["id"]), app["name"]
+
     for app in APP_DB:
-        names = [app.get("name", "").lower()] + [a.lower() for a in app.get("aliases", [])]
-        if any(target in n or n in target for n in names if len(n) > 3):
+        names = [app.get("name", "")] + app.get("aliases", [])
+        if any(clean == norm(n) for n in names):
             return int(app["id"]), app["name"]
+
+    candidates = []
+    for app in APP_DB:
+        names = [app.get("name", "")] + app.get("aliases", [])
+        for n in names:
+            nn = norm(n)
+            if clean and clean in nn:
+                candidates.append((len(nn), int(app["id"]), app["name"]))
+    if candidates:
+        candidates.sort(key=lambda x: x[0])
+        return candidates[0][1], candidates[0][2]
+
     return None, game_name
 
 async def update_rpc():
@@ -112,17 +146,39 @@ async def update_rpc():
         kwargs["application_id"] = current_app_id
     await bot.change_presence(activity=discord.Activity(**kwargs))
 
+async def clear_msgs(ch):
+    global cleaning
+    n = 0
+    try:
+        async for m in ch.history(limit=None):
+            if not cleaning:
+                break
+            if m.author.id == bot.user.id:
+                try:
+                    await m.delete()
+                    n += 1
+                    print(f"Deleted [{n}] in {getattr(ch, 'name', ch.id)}")
+                    await asyncio.sleep(random.uniform(1.0, 1.4))
+                except discord.Forbidden:
+                    break
+                except discord.HTTPException as e:
+                    await asyncio.sleep(5 if e.status == 429 else 2)
+    except Exception:
+        pass
+    return n
+
 @bot.event
 async def on_ready():
     await load_discord_apps()
-    app_id, _ = find_app_id(current_game)
+    app_id, official = find_app_id(current_game)
     if app_id:
-        global current_app_id
+        global current_app_id, current_game
         current_app_id = app_id
-    print(f"Logged in: {bot.user} | Games: {len(GAMES)} | Icons DB: {len(APP_DB)}")
+        current_game = official
+    print(f"Ready: {bot.user} | Games: {len(GAMES)} | Icons DB: {len(APP_DB)}")
 
 @bot.before_invoke
-async def clean_cmd(ctx):
+async def auto_del(ctx):
     try:
         await ctx.message.delete()
     except Exception:
@@ -166,14 +222,23 @@ async def setgame(ctx, *, arg: str):
     current_app_id = app_id
     if active:
         await update_rpc()
-    icon_state = "With Icon" if app_id else "No Icon"
+    icon_state = "Icon OK" if app_id else "No Icon"
     await temp_msg(ctx, f"Game: `{current_game}` ({icon_state})")
+
+@bot.command()
+async def settime(ctx, minutes: int):
+    global start_ts
+    start_ts = time.time() - (minutes * 60)
+    if active:
+        await update_rpc()
+    await temp_msg(ctx, f"Timer: `{minutes}m`")
 
 @bot.command()
 async def start(ctx):
     global active, start_ts
     active = True
-    start_ts = time.time()
+    if start_ts == 0:
+        start_ts = time.time()
     await update_rpc()
     await temp_msg(ctx, f"Started: `{current_game}`")
 
@@ -192,16 +257,72 @@ async def status(ctx):
     await temp_msg(ctx, f"State: `{st}` | Game: `{current_game}` | Time: `{mins}m`", 8)
 
 @bot.command()
+async def cdm(ctx, uid: int):
+    global cleaning
+    if cleaning:
+        return
+    try:
+        u = await bot.fetch_user(uid)
+        dm = u.dm_channel or await u.create_dm()
+    except Exception:
+        return
+    cleaning = True
+    await clear_msgs(dm)
+    cleaning = False
+    print("DM clean done.")
+
+@bot.command()
+async def cchat(ctx, cid: int = None):
+    global cleaning
+    if cleaning:
+        return
+    ch = ctx.channel
+    if cid:
+        ch = bot.get_channel(cid) or await bot.fetch_channel(cid)
+    if not ch:
+        return
+    cleaning = True
+    await clear_msgs(ch)
+    cleaning = False
+    print("Chat clean done.")
+
+@bot.command()
+async def cserver(ctx, gid: int):
+    global cleaning
+    if cleaning:
+        return
+    g = bot.get_guild(gid)
+    if not g:
+        return
+    cleaning = True
+    for ch in g.text_channels:
+        if not cleaning:
+            break
+        await clear_msgs(ch)
+    cleaning = False
+    print("Server clean done.")
+
+@bot.command()
+async def stopclean(ctx):
+    global cleaning
+    cleaning = False
+    print("Clean stopped.")
+
+@bot.command()
 async def help(ctx):
     txt = (
+        "**Games**\n"
         "`&games <1-10>`\n"
         "`&search <name>`\n"
         "`&setgame <num or name>`\n"
-        "`&start`\n"
-        "`&stop`\n"
-        "`&status`"
+        "`&settime <minutes>`\n"
+        "`&start` | `&stop` | `&status`\n\n"
+        "**Cleaner**\n"
+        "`&cdm <id>`\n"
+        "`&cchat <id>`\n"
+        "`&cserver <id>`\n"
+        "`&stopclean`"
     )
-    await temp_msg(ctx, txt, 10)
+    await temp_msg(ctx, txt, 12)
 
 bot.run(TOKEN)
-

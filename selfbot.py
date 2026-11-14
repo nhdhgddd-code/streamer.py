@@ -1,5 +1,4 @@
 import asyncio
-import random
 import re
 import time
 import aiohttp
@@ -87,11 +86,12 @@ bot = commands.Bot(
     help_command=None
 )
 
-current_game = "Dead by Daylight"
-current_app_id = 381889378202451979
-active = False
-start_ts = 0
-cleaning = False
+state = {
+    "game": "Dead by Daylight",
+    "app_id": 381889378202451979,
+    "active": False,
+    "start_ts": 0
+}
 
 def norm(s):
     return re.sub(r"[^a-z0-9 ]", "", s.lower()).strip()
@@ -134,47 +134,25 @@ def find_app_id(game_name):
     return None, game_name
 
 async def update_rpc():
-    if not active:
+    if not state["active"]:
         await bot.change_presence(activity=None)
         return
     kwargs = {
         "type": discord.ActivityType.playing,
-        "name": current_game,
-        "timestamps": {"start": int(start_ts * 1000)}
+        "name": state["game"],
+        "timestamps": {"start": int(state["start_ts"] * 1000)}
     }
-    if current_app_id:
-        kwargs["application_id"] = current_app_id
+    if state["app_id"]:
+        kwargs["application_id"] = state["app_id"]
     await bot.change_presence(activity=discord.Activity(**kwargs))
-
-async def clear_msgs(ch):
-    global cleaning
-    n = 0
-    try:
-        async for m in ch.history(limit=None):
-            if not cleaning:
-                break
-            if m.author.id == bot.user.id:
-                try:
-                    await m.delete()
-                    n += 1
-                    print(f"Deleted [{n}] in {getattr(ch, 'name', ch.id)}")
-                    await asyncio.sleep(random.uniform(1.0, 1.4))
-                except discord.Forbidden:
-                    break
-                except discord.HTTPException as e:
-                    await asyncio.sleep(5 if e.status == 429 else 2)
-    except Exception:
-        pass
-    return n
 
 @bot.event
 async def on_ready():
     await load_discord_apps()
-    app_id, official = find_app_id(current_game)
+    app_id, official = find_app_id(state["game"])
     if app_id:
-        global current_app_id, current_game
-        current_app_id = app_id
-        current_game = official
+        state["app_id"] = app_id
+        state["game"] = official
     print(f"Ready: {bot.user} | Games: {len(GAMES)} | Icons DB: {len(APP_DB)}")
 
 @bot.before_invoke
@@ -215,114 +193,53 @@ async def search(ctx, *, query: str):
 
 @bot.command()
 async def setgame(ctx, *, arg: str):
-    global current_game, current_app_id
     chosen = GAMES.get(arg, arg)
     app_id, official_name = find_app_id(chosen)
-    current_game = official_name if app_id else chosen
-    current_app_id = app_id
-    if active:
+    state["game"] = official_name if app_id else chosen
+    state["app_id"] = app_id
+    if state["active"]:
         await update_rpc()
     icon_state = "Icon OK" if app_id else "No Icon"
-    await temp_msg(ctx, f"Game: `{current_game}` ({icon_state})")
+    await temp_msg(ctx, f"Game: `{state['game']}` ({icon_state})")
 
 @bot.command()
 async def settime(ctx, minutes: int):
-    global start_ts
-    start_ts = time.time() - (minutes * 60)
-    if active:
-        await update_rpc()
+    state["start_ts"] = time.time() - (minutes * 60)
+    if state["active"]:
+        await update_rpс() if 'update_rpс' in globals() else await update_rpc()
     await temp_msg(ctx, f"Timer: `{minutes}m`")
 
 @bot.command()
 async def start(ctx):
-    global active, start_ts
-    active = True
-    if start_ts == 0:
-        start_ts = time.time()
+    state["active"] = True
+    if state["start_ts"] == 0:
+        state["start_ts"] = time.time()
     await update_rpc()
-    await temp_msg(ctx, f"Started: `{current_game}`")
+    await temp_msg(ctx, f"Started: `{state['game']}`")
 
 @bot.command()
 async def stop(ctx):
-    global active, start_ts
-    active = False
-    start_ts = 0
+    state["active"] = False
+    state["start_ts"] = 0
     await update_rpc()
     await temp_msg(ctx, "Stopped.")
 
 @bot.command()
 async def status(ctx):
-    st = "ON" if active else "OFF"
-    mins = int((time.time() - start_ts) // 60) if active else 0
-    await temp_msg(ctx, f"State: `{st}` | Game: `{current_game}` | Time: `{mins}m`", 8)
-
-@bot.command()
-async def cdm(ctx, uid: int):
-    global cleaning
-    if cleaning:
-        return
-    try:
-        u = await bot.fetch_user(uid)
-        dm = u.dm_channel or await u.create_dm()
-    except Exception:
-        return
-    cleaning = True
-    await clear_msgs(dm)
-    cleaning = False
-    print("DM clean done.")
-
-@bot.command()
-async def cchat(ctx, cid: int = None):
-    global cleaning
-    if cleaning:
-        return
-    ch = ctx.channel
-    if cid:
-        ch = bot.get_channel(cid) or await bot.fetch_channel(cid)
-    if not ch:
-        return
-    cleaning = True
-    await clear_msgs(ch)
-    cleaning = False
-    print("Chat clean done.")
-
-@bot.command()
-async def cserver(ctx, gid: int):
-    global cleaning
-    if cleaning:
-        return
-    g = bot.get_guild(gid)
-    if not g:
-        return
-    cleaning = True
-    for ch in g.text_channels:
-        if not cleaning:
-            break
-        await clear_msgs(ch)
-    cleaning = False
-    print("Server clean done.")
-
-@bot.command()
-async def stopclean(ctx):
-    global cleaning
-    cleaning = False
-    print("Clean stopped.")
+    st = "ON" if state["active"] else "OFF"
+    mins = int((time.time() - state["start_ts"]) // 60) if state["active"] else 0
+    await temp_msg(ctx, f"State: `{st}` | Game: `{state['game']}` | Time: `{mins}m`", 8)
 
 @bot.command()
 async def help(ctx):
     txt = (
-        "**Games**\n"
+        "**Games Commands:**\n"
         "`&games <1-10>`\n"
         "`&search <name>`\n"
         "`&setgame <num or name>`\n"
         "`&settime <minutes>`\n"
-        "`&start` | `&stop` | `&status`\n\n"
-        "**Cleaner**\n"
-        "`&cdm <id>`\n"
-        "`&cchat <id>`\n"
-        "`&cserver <id>`\n"
-        "`&stopclean`"
+        "`&start` | `&stop` | `&status`"
     )
-    await temp_msg(ctx, txt, 12)
+    await temp_msg(ctx, txt, 10)
 
 bot.run(TOKEN)
